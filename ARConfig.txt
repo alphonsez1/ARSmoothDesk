@@ -1,0 +1,20 @@
+# AR Content Stabilizer Configuration
+# Display sizes
+DisplayWidth=1920
+DisplayHeight=1080
+FieldOfView=52
+
+ContentWidth=1366
+ContentHeight=853
+
+# Display settings
+# For target display: -1=last display, -2=second-to-last, 0=primary, 1,2,3...=specific displays
+TargetDisplay=-1
+SourceDisplay=0
+
+# Movement settings
+FollowSpeedUp=1.5
+FollowSpeedDown=2.5
+
+# Capture settings
+FrameRate=60

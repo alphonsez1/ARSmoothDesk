@@ -1,0 +1,1 @@
+For the ARMoni project the hidapi-win is used based on the BSD license.
