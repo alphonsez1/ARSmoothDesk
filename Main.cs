@@ -149,12 +149,8 @@ namespace ARContentStabilizer
 
         #region Tracking and Movement
 
-        private Vector3 viewFrontRay;
-        private Vector3 viewRightRay;
-
-        private Vector3 screenCenterRay;
-
-        private float radius = 2596.1f;
+        // Head tracking manager
+        private HeadTrackingManager headTracking;
 
         // Content position variables
         private PointF currentPosition;
@@ -182,10 +178,13 @@ namespace ARContentStabilizer
             this.WindowState = FormWindowState.Maximized;
             
             // Set background color to black
-            this.BackColor = Color.Black;
+            this.BackColor = Color.White;
             
-            this.radius = SphereTracking.CalculateDistanceToDisplay(
+            float radius = SphereTracking.CalculateDistanceToDisplay(
                 config.DisplaySize.Width, config.DisplaySize.Height, config.FieldOfView);
+            
+            // Initialize head tracking
+            headTracking = new HeadTrackingManager(radius);
             
             // Set the form to run on the target display
             SetTargetDisplay();
@@ -237,6 +236,12 @@ namespace ARContentStabilizer
             );
             
             Console.WriteLine($"Boundary updated: Min({minBoundary.X}, {minBoundary.Y}), Max({maxBoundary.X}, {maxBoundary.Y})");
+            
+            // Update boundaries in head tracking manager
+            if (headTracking != null)
+            {
+                headTracking.SetBoundaries(minBoundary, maxBoundary);
+            }
         }
 
         private void SetTargetDisplay()
@@ -386,16 +391,9 @@ namespace ARContentStabilizer
 
         private void InitializeTracking()
         {
-            // Connect to AR glasses
-            int connectionResult = StartConnection();
-            if (connectionResult == 1)
+            // Connect to AR glasses using the head tracking manager
+            if (headTracking.Initialize())
             {
-                Console.WriteLine("Connection to AR glasses started successfully");
-
-                // Get initial rotation data
-                UpdateRotationData();
-                screenCenterRay = viewFrontRay;
-                Console.WriteLine($"Initial view center ray: {viewFrontRay.X}, {viewFrontRay.Y}, {viewFrontRay.Z}");
                 // Start update loops
                 updateTimer.Start();
                 if (!config.UseThreadedCapture && captureTimer != null)
@@ -484,45 +482,24 @@ namespace ARContentStabilizer
 
             Console.WriteLine("----------");
 
-            // Update rotation data from AR glasses
-            UpdateRotationData();
+            // Update rotation data and calculate new position
+            headTracking.UpdateRotationData();
 
-            Console.WriteLine($"viewCenterRay: {viewFrontRay.X}, {viewFrontRay.Y}, {viewFrontRay.Z}");
-            Console.WriteLine($"viewRightRay: {viewRightRay.X}, {viewRightRay.Y}, {viewRightRay.Z}");
-            Console.WriteLine($"screenCenterRay before update: {screenCenterRay.X}, {screenCenterRay.Y}, {screenCenterRay.Z}");
+            // Log tracking rays for debugging
+            Console.WriteLine($"viewCenterRay: {headTracking.ViewFrontRay.X}, {headTracking.ViewFrontRay.Y}, {headTracking.ViewFrontRay.Z}");
+            Console.WriteLine($"viewRightRay: {headTracking.ViewRightRay.X}, {headTracking.ViewRightRay.Y}, {headTracking.ViewRightRay.Z}");
+            Console.WriteLine($"screenCenterRay before update: {headTracking.ScreenCenterRay.X}, {headTracking.ScreenCenterRay.Y}, {headTracking.ScreenCenterRay.Z}");
 
-            // log currentPosision and targetPosition before update
+            // Get current position before update
             Console.WriteLine($"Current Position Before Update: {currentPosition.X}, {currentPosition.Y}");
 
-            // Calculate the intersection of the viewRay and the sphere
-            var screenCenterPoint = SphereTracking.RayPlaneIntersection(
-                screenCenterRay, viewFrontRay, radius);
-                
-            var newPosition = SphereTracking.ComputePlaneLocalCoordinates(
-                screenCenterPoint, viewFrontRay, viewRightRay, radius);
+            // Get new position from head tracking (includes clamping and ray adjustments)
+            currentPosition = headTracking.UpdateHeadPosition();
 
-            Console.WriteLine($"New Position: {newPosition.X}, {newPosition.Y}");
-
-            if (float.IsNaN(newPosition.X) || float.IsNaN(newPosition.Y)) {
-                Console.WriteLine("Position calculation failed");
-            } else {    
-                // Clamp target position to boundaries
-                currentPosition.X = Math.Clamp(newPosition.X, minBoundary.X, maxBoundary.X);
-                currentPosition.Y = Math.Clamp(newPosition.Y, minBoundary.Y, maxBoundary.Y);
-            }
-
-            if (currentPosition != newPosition) {
-                Console.WriteLine("Clamped Position");
-                
-                screenCenterRay = SphereTracking.LocalCoordinatesToRayVector(
-                    currentPosition, viewFrontRay, viewRightRay, radius);
-                
-                Console.WriteLine($"Adjusted screenCenterRay: {screenCenterRay.X}, {screenCenterRay.Y}, {screenCenterRay.Z}");
-            }
-
+            // Log the final position
             Console.WriteLine($"Current Position After Update: {currentPosition.X}, {currentPosition.Y}");
 
-            // Update content position
+            // Update content position on screen
             UpdateContentPosition();
 
             // Print the time taken in milliseconds for debugging
@@ -569,7 +546,7 @@ namespace ARContentStabilizer
             }
             
             // Disconnect from AR glasses
-            StopConnection();
+            headTracking.Shutdown();
             
             // Clean up resources
             lock (this)
@@ -590,23 +567,6 @@ namespace ARContentStabilizer
         #endregion
 
         #region Core Functionality
-
-        private void UpdateRotationData()
-        {
-            // Get data from AirAPI
-            var eulerPtr = GetEuler();
-            // Order: roll, pitch, yaw
-            var eulerArray = new float[3];
-            Marshal.Copy(eulerPtr, eulerArray, 0, 3);
-
-            Console.WriteLine("Euler angles: " +
-                $"Roll: {ToDegrees(eulerArray[0])}, " +
-                $"Pitch: {ToDegrees(eulerArray[1])}, " +
-                $"Yaw: {ToDegrees(eulerArray[2])}");
-
-            // Update the view center ray.
-            (this.viewFrontRay, this.viewRightRay) = SphereTracking.EulerAnglesToVectors(eulerArray[2], eulerArray[1], eulerArray[0]);
-        }
 
         private void UpdateContentPosition()
         {
