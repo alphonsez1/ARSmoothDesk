@@ -5,6 +5,11 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
+using SharpDX;
+using SharpDX.Direct3D11;
+using SharpDX.DXGI;
+using Device = SharpDX.Direct3D11.Device;
+using Resource = SharpDX.DXGI.Resource;
 using Timer = System.Windows.Forms.Timer;
 
 namespace ARContentStabilizer
@@ -13,88 +18,16 @@ namespace ARContentStabilizer
     {
         #region DLL Imports
 
-        // Screen capture DLL imports
-        [DllImport("user32.dll")]
-        static extern IntPtr GetDC(IntPtr hwnd);
-
-        [DllImport("user32.dll")]
-        static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
-
-        [DllImport("gdi32.dll")]
-        static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight, 
-            IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
-
-        [DllImport("gdi32.dll")]
-        static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-        [DllImport("gdi32.dll")]
-        static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
-
-        [DllImport("gdi32.dll")]
-        static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
-
-        [DllImport("gdi32.dll")]
-        static extern bool DeleteObject(IntPtr hObject);
-
-        [DllImport("gdi32.dll")]
-        static extern bool DeleteDC(IntPtr hdc);
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct POINT
-        {
-            public int x;
-            public int y;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct CURSORINFO
-        {
-            public int cbSize;
-            public int flags;
-            public IntPtr hCursor;
-            public POINT ptScreenPos;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct ICONINFO
-        {
-            public bool fIcon;
-            public int xHotspot;
-            public int yHotspot;
-            public IntPtr hbmMask;
-            public IntPtr hbmColor;
-        }
-
-        // Mouse cursor capture imports
-        [DllImport("user32.dll")]
-        static extern bool GetCursorInfo(out CURSORINFO pci);
-
-        [DllImport("user32.dll")]
-        static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
-
-        [DllImport("user32.dll")]
-        static extern IntPtr GetCursor();
-
-        [DllImport("user32.dll")]
-        static extern bool GetCursorPos(out POINT lpPoint);
-
-        [DllImport("user32.dll")]
-        static extern IntPtr CopyIcon(IntPtr hIcon);
-
-        [DllImport("user32.dll")]
-        static extern bool DrawIcon(IntPtr hdc, int x, int y, IntPtr hIcon);
-
+        // DPI awareness imports
         [DllImport("user32.dll")]
         static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
         [DllImport("user32.dll")]
         static extern bool GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
 
-        // Constants for cursor
-        private const int CURSOR_SHOWING = 0x00000001;
-
-        // Constants for BitBlt
-        private const int SRCCOPY = 0xCC0020;
+        // Memory copying import
+        [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory", SetLastError = false)]
+        private static extern void CopyMemory(IntPtr dest, IntPtr src, int count);
 
         // Constants for DPI awareness
         private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
@@ -126,6 +59,36 @@ namespace ARContentStabilizer
         // Timer for capture
         private Timer captureTimer;
 
+        // Desktop Duplication API objects
+        private Factory1 factory;
+        private Adapter1 adapter;
+        private Device device;
+        private DeviceContext context;
+        private OutputDuplication outputDuplication;
+        private Output1 output1;
+        private Texture2D stagingTexture;
+        private int adapterOutput;
+
+        // Add these structures at the top of the class, in the Properties and Fields region
+        private struct CursorInfo
+        {
+            public bool IsVisible;
+            public Point Position;
+            public SharpDX.DXGI.OutputDuplicatePointerPosition PointerPosition;
+            public OutputDuplicatePointerShapeInformation ShapeInfo;
+            public byte[] ShapeBuffer;
+        }
+
+        private CursorInfo currentCursor;
+
+        // Add these enums in the Properties and Fields region
+        private enum CursorShapeType
+        {
+            MonoChrome = 1,
+            Color = 2,
+            MaskedColor = 4
+        }
+
         #endregion
 
         #region Constructor and Initialization
@@ -136,8 +99,6 @@ namespace ARContentStabilizer
             this.contentDisplay = displayControl;
             
             // Create initial bitmaps
-            capturedScreen = new Bitmap(Screen.AllScreens[GetSourceDisplayIndex()].Bounds.Width, 
-                                      Screen.AllScreens[GetSourceDisplayIndex()].Bounds.Height);
             scaledCapture = new Bitmap(config.ContentSize.Width, config.ContentSize.Height);
             
             // Initialize display control
@@ -146,8 +107,138 @@ namespace ARContentStabilizer
             // Detect source display scaling factor
             UpdateSourceDisplayScaleFactor();
             
+            // Initialize Desktop Duplication API
+            InitializeDesktopDuplication();
+            
             // Set up capture mechanism
             SetupCapture();
+        }
+
+        private void InitializeDesktopDuplication()
+        {
+            try
+            {
+                // Create DXGI Factory
+                factory = new Factory1();
+                
+                int adapterCount = factory.GetAdapterCount1();
+                Console.WriteLine($"Found {adapterCount} adapters");
+                
+                // Try each adapter
+                for (int i = 0; i < adapterCount; i++)
+                {
+                    try
+                    {
+                        adapter = factory.GetAdapter1(i);
+                        Console.WriteLine($"Trying adapter {i}: {adapter.Description.Description}");
+                        
+                        // Continue with device creation...
+                        // If successful, break out of the loop
+                        break;
+                    }
+                    catch
+                    {
+                        // Clean up and try next adapter
+                        adapter?.Dispose();
+                        adapter = null;
+                    }
+                }
+                
+                if (adapter == null)
+                {
+                    throw new Exception("No suitable graphics adapter found");
+                }
+                
+                // Create Direct3D device
+                device = new Device(adapter, DeviceCreationFlags.BgraSupport);
+                Console.WriteLine("D3D device created successfully");
+                
+                // Create device context
+                context = device.ImmediateContext;
+                
+                // Get source display index
+                adapterOutput = GetSourceDisplayIndex();
+                
+                try
+                {
+                    // Find the right output (monitor)
+                    var output = adapter.GetOutput(adapterOutput);
+                    Console.WriteLine($"Using display: {output.Description.DeviceName}");
+                    
+                    output1 = output.QueryInterface<Output1>();
+                    output.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to get output: {ex.Message}");
+                    throw;
+                }
+                
+                try
+                {
+                    // Create output duplication for this output
+                    outputDuplication = output1.DuplicateOutput(device);
+                    Console.WriteLine("Output duplication created successfully");
+                }
+                catch (SharpDXException ex)
+                {
+                    // Check specific DXGI error codes
+                    if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.NotCurrentlyAvailable.Result.Code)
+                    {
+                        Console.WriteLine("Desktop Duplication is already in use by another application");
+                        throw new InvalidOperationException("Desktop Duplication is already in use by another application");
+                    }
+                    else if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.Unsupported.Result.Code)
+                    {
+                        Console.WriteLine("Desktop Duplication is not supported on this system");
+                        throw new NotSupportedException("Desktop Duplication is not supported on this system");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Failed to create output duplication: {ex.Message}, Code: {ex.ResultCode}");
+                        throw;
+                    }
+                }
+                
+                // Get output description to determine screen size
+                var outputDesc = output1.Description;
+                Rectangle bounds = new Rectangle(outputDesc.DesktopBounds.Left, 
+                                                outputDesc.DesktopBounds.Top,
+                                                outputDesc.DesktopBounds.Right - outputDesc.DesktopBounds.Left,
+                                                outputDesc.DesktopBounds.Bottom - outputDesc.DesktopBounds.Top);
+                
+                Console.WriteLine($"Capture bounds: {bounds.Width}x{bounds.Height} at {bounds.X},{bounds.Y}");
+                
+                // Create staging texture for CPU access
+                var textureDesc = new Texture2DDescription
+                {
+                    CpuAccessFlags = CpuAccessFlags.Read,
+                    BindFlags = BindFlags.None,
+                    Format = Format.B8G8R8A8_UNorm,
+                    Width = bounds.Width,
+                    Height = bounds.Height,
+                    OptionFlags = ResourceOptionFlags.None,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    SampleDescription = { Count = 1, Quality = 0 },
+                    Usage = ResourceUsage.Staging
+                };
+                
+                stagingTexture = new Texture2D(device, textureDesc);
+                
+                // Create the bitmap with screen dimensions
+                capturedScreen = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+                
+                Console.WriteLine($"Desktop Duplication API initialized for output {adapterOutput} with dimensions {bounds.Width}x{bounds.Height}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error initializing Desktop Duplication API: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                // Clean up any resources that were created
+                CleanupDuplicationResources();
+                throw;
+            }
         }
 
         private void SetupCapture()
@@ -173,7 +264,7 @@ namespace ARContentStabilizer
         private int GetSourceDisplayIndex()
         {
             // Convert relative indices to absolute
-            int displayCount = Screen.AllScreens.Length;
+            int displayCount = adapter.GetOutputCount();
             int actualDisplayIndex = config.SourceDisplayIndex;
             
             if (config.SourceDisplayIndex < 0)
@@ -187,6 +278,20 @@ namespace ARContentStabilizer
             else if (config.SourceDisplayIndex >= displayCount)
             {
                 actualDisplayIndex = displayCount - 1;
+            }
+            
+            Console.WriteLine($"Display selection: requested={config.SourceDisplayIndex}, actual={actualDisplayIndex}, total={displayCount}");
+            
+            // Also log information about all available displays
+            for (int i = 0; i < displayCount; i++)
+            {
+                using (var tmpOutput = adapter.GetOutput(i))
+                {
+                    Console.WriteLine($"Display {i}: {tmpOutput.Description.DeviceName}, " +
+                                     $"Bounds: {tmpOutput.Description.DesktopBounds.Left},{tmpOutput.Description.DesktopBounds.Top} " +
+                                     $"{tmpOutput.Description.DesktopBounds.Right-tmpOutput.Description.DesktopBounds.Left}x" +
+                                     $"{tmpOutput.Description.DesktopBounds.Bottom-tmpOutput.Description.DesktopBounds.Top}");
+                }
             }
             
             return actualDisplayIndex;
@@ -262,7 +367,35 @@ namespace ARContentStabilizer
             {
                 capturedScreen?.Dispose();
                 scaledCapture?.Dispose();
+                
+                // Clean up DirectX resources
+                CleanupDuplicationResources();
             }
+        }
+
+        private void CleanupDuplicationResources()
+        {
+            // Dispose of all DirectX resources
+            stagingTexture?.Dispose();
+            stagingTexture = null;
+            
+            outputDuplication?.Dispose();
+            outputDuplication = null;
+            
+            output1?.Dispose();
+            output1 = null;
+            
+            context?.Dispose();
+            context = null;
+            
+            device?.Dispose();
+            device = null;
+            
+            adapter?.Dispose();
+            adapter = null;
+            
+            factory?.Dispose();
+            factory = null;
         }
 
         private void CaptureTimer_Tick(object sender, EventArgs e)
@@ -336,148 +469,388 @@ namespace ARContentStabilizer
 
         private void CaptureScreen()
         {
+            // Check if testing is enabled
+            if (config.EnableTestPattern)
+            {
+                DrawTestPattern();
+                return;
+            }
+
+            // Check if Desktop Duplication API is initialized
+            if (outputDuplication == null)
+            {
+                Console.WriteLine("Desktop Duplication API not initialized, using fallback capture");
+                FallbackCaptureScreen();
+                return;
+            }
+
+            // Try to get the next frame
+            SharpDX.DXGI.Resource desktopResource = null;
+            OutputDuplicateFrameInformation frameInfo;
+            Result result = Result.Ok; // Define result outside the try block
+
             try
             {
-                // Get the source screen to capture
-                Screen sourceScreen = Screen.AllScreens[GetSourceDisplayIndex()];
-                Rectangle screenBounds = sourceScreen.Bounds;
+                // Wait to get the next frame
+                result = outputDuplication.TryAcquireNextFrame(500, out frameInfo, out desktopResource);
                 
-                // Determine the actual area to capture
-                Rectangle captureArea = captureRegion.IsEmpty ? screenBounds : captureRegion;
+                // Log frame information for debugging
+                Console.WriteLine($"Frame acquired: {result.Success}, AccumulatedFrames: {frameInfo.AccumulatedFrames}");
                 
-                // Apply scaling factor to capture correct physical pixel resolution
-                int actualWidth = (int)(captureArea.Width * sourceScaleFactor);
-                int actualHeight = (int)(captureArea.Height * sourceScaleFactor);
-                int actualLeft = (int)(captureArea.Left * sourceScaleFactor);
-                int actualTop = (int)(captureArea.Top * sourceScaleFactor);
-                
-                if (config.UseDirectCapture)
+                if (desktopResource != null && result.Success)
                 {
-                    // Direct capture using BitBlt for better performance
-                    IntPtr desktopDC = GetDC(IntPtr.Zero);
-                    
                     try
                     {
-                        // Create or reuse bitmap
-                        if (capturedScreen == null || capturedScreen.Width != actualWidth || capturedScreen.Height != actualHeight)
+                        // Update cursor information
+                        UpdateCursor(frameInfo);
+
+                        // Get the desktop image
+                        using (var desktopTexture = desktopResource.QueryInterface<Texture2D>())
                         {
-                            lock (this) // Prevent race condition with UpdateContentImage
-                            {
-                                capturedScreen?.Dispose();
-                                capturedScreen = new Bitmap(actualWidth, actualHeight, PixelFormat.Format32bppRgb);
-                            }
-                        }
-                        
-                        using (Graphics g = Graphics.FromImage(capturedScreen))
-                        {
-                            // Set up graphics for speed
-                            g.CompositingMode = CompositingMode.SourceCopy; // Fastest
-                            g.CompositingQuality = CompositingQuality.HighSpeed;
-                            g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                            g.SmoothingMode = SmoothingMode.None;
-                            g.PixelOffsetMode = PixelOffsetMode.None;
+                            // Log texture details
+                            var desc = desktopTexture.Description;
+                            Console.WriteLine($"Texture: {desc.Width}x{desc.Height}, Format={desc.Format}, " +
+                                             $"Usage={desc.Usage}, Samples={desc.SampleDescription.Count}");
                             
-                            IntPtr hdc = g.GetHdc();
+                            // Copy the desktop texture to a staging texture that allows for CPU access
+                            context.CopyResource(desktopTexture, stagingTexture);
+                            
+                            // Log when copy is complete
+                            Console.WriteLine("Resource copied to staging texture");
+                            
+                            // Map the staging texture to get access to the pixel data
+                            var dataBox = context.MapSubresource(stagingTexture, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
+                            
                             try
                             {
-                                // Copy screen to bitmap in one operation
-                                BitBlt(hdc, 0, 0, actualWidth, actualHeight,
-                                      desktopDC, actualLeft, actualTop, SRCCOPY);
+                                // Create a lock around bitmap operations to ensure thread safety
+                                lock (capturedScreen)
+                                {
+                                    // Copy the pixel data to the bitmap
+                                    var rect = new Rectangle(0, 0, capturedScreen.Width, capturedScreen.Height);
+                                    BitmapData bitmapData = null;
+                                    
+                                    try
+                                    {
+                                        bitmapData = capturedScreen.LockBits(rect, ImageLockMode.WriteOnly, capturedScreen.PixelFormat);
+                                        
+                                        // Make sure we're copying the correct number of bytes
+                                        int bytesToCopy = Math.Min(dataBox.RowPitch, bitmapData.Stride);
+                                        
+                                        // Copy each line (need to handle stride properly)
+                                        for (int y = 0; y < capturedScreen.Height; y++)
+                                        {
+                                            IntPtr sourcePtr = dataBox.DataPointer + y * dataBox.RowPitch;
+                                            IntPtr destPtr = bitmapData.Scan0 + y * bitmapData.Stride;
+                                            CopyMemory(destPtr, sourcePtr, bytesToCopy);
+                                        }
+                                    }
+                                    finally
+                                    {
+                                        // Always unlock the bits, even if an error occurred
+                                        if (bitmapData != null)
+                                        {
+                                            capturedScreen.UnlockBits(bitmapData);
+                                        }
+                                    }
+                                }
                             }
                             finally
                             {
-                                g.ReleaseHdc(hdc);
+                                // Always unmap the texture, even if an error occurred
+                                context.UnmapSubresource(stagingTexture, 0);
                             }
                         }
-                        
-                        DrawCursorOnBitmap(capturedScreen, captureArea);
+
+                        // After copying the screen content, draw the cursor
+                        if (currentCursor.IsVisible && currentCursor.ShapeBuffer != null)
+                        {
+                            string cursorTypeStr = "Unknown";
+                            switch (currentCursor.ShapeInfo.Type)
+                            {
+                                case (int)CursorShapeType.MonoChrome: cursorTypeStr = "MonoChrome"; break;
+                                case (int)CursorShapeType.Color: cursorTypeStr = "Color"; break;
+                                case (int)CursorShapeType.MaskedColor: cursorTypeStr = "MaskedColor"; break;
+                            }
+                            
+                            Console.WriteLine($"Drawing cursor: Type={cursorTypeStr}, Size={currentCursor.ShapeInfo.Width}x{currentCursor.ShapeInfo.Height}, " +
+                                             $"Position={currentCursor.Position.X},{currentCursor.Position.Y}");
+
+                            lock (capturedScreen)
+                            {
+                                using (Graphics g = Graphics.FromImage(capturedScreen))
+                                {
+                                    if (currentCursor.ShapeInfo.Type == (int)CursorShapeType.Color)
+                                    {
+                                        // Handle color cursor
+                                        using (var cursorBitmap = new Bitmap(
+                                            currentCursor.ShapeInfo.Width,
+                                            currentCursor.ShapeInfo.Height,
+                                            PixelFormat.Format32bppArgb))
+                                        {
+                                            var bitmapData = cursorBitmap.LockBits(
+                                                new Rectangle(0, 0, cursorBitmap.Width, cursorBitmap.Height),
+                                                ImageLockMode.WriteOnly,
+                                                PixelFormat.Format32bppArgb);
+
+                                            Marshal.Copy(currentCursor.ShapeBuffer, 0, bitmapData.Scan0,
+                                                Math.Min(currentCursor.ShapeBuffer.Length, bitmapData.Stride * bitmapData.Height));
+
+                                            cursorBitmap.UnlockBits(bitmapData);
+
+                                            g.DrawImage(cursorBitmap,
+                                                currentCursor.Position.X,
+                                                currentCursor.Position.Y);
+                                        }
+                                    }
+                                    else if (currentCursor.ShapeInfo.Type == (int)CursorShapeType.MaskedColor)
+                                    {
+                                        // Handle masked color cursor
+                                        using (var cursorBitmap = new Bitmap(
+                                            currentCursor.ShapeInfo.Width,
+                                            currentCursor.ShapeInfo.Height,
+                                            PixelFormat.Format32bppArgb))
+                                        {
+                                            var bitmapData = cursorBitmap.LockBits(
+                                                new Rectangle(0, 0, cursorBitmap.Width, cursorBitmap.Height),
+                                                ImageLockMode.WriteOnly,
+                                                PixelFormat.Format32bppArgb);
+
+                                            try
+                                            {
+                                                int stride = currentCursor.ShapeInfo.Pitch;
+                                                int height = currentCursor.ShapeInfo.Height;
+                                                int width = currentCursor.ShapeInfo.Width;
+                                                
+                                                // First copy the XOR mask (color data)
+                                                Marshal.Copy(currentCursor.ShapeBuffer, 0, bitmapData.Scan0, 
+                                                    Math.Min(stride * height, bitmapData.Stride * height));
+
+                                                // Verify we have enough buffer for the AND mask
+                                                int maskOffset = stride * height;
+                                                if (currentCursor.ShapeBuffer.Length > maskOffset)
+                                                {
+                                                    // Rewrite without unsafe code
+                                                    for (int y = 0; y < height; y++)
+                                                    {
+                                                        for (int x = 0; x < width; x++)
+                                                        {
+                                                            int byteIndex = maskOffset + (y * stride) + (x / 8);
+                                                            
+                                                            // Add bounds checking to prevent array access out of bounds
+                                                            if (byteIndex >= currentCursor.ShapeBuffer.Length)
+                                                                continue;
+                                                                
+                                                            int bitIndex = 7 - (x % 8);
+                                                            bool andBit = (currentCursor.ShapeBuffer[byteIndex] & (1 << bitIndex)) != 0;
+                                                            
+                                                            if (andBit)
+                                                            {
+                                                                // Get the offset to the pixel in the bitmap data
+                                                                int pixelOffset = (y * bitmapData.Stride) + (x * 4);
+                                                                
+                                                                // Set alpha to 0 (transparent) while preserving RGB
+                                                                Marshal.WriteByte(bitmapData.Scan0 + pixelOffset + 3, 0);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                else
+                                                {
+                                                    Console.WriteLine($"Cursor buffer too small for AND mask. Expected offset: {maskOffset}, buffer length: {currentCursor.ShapeBuffer.Length}");
+                                                }
+                                            }
+                                            finally
+                                            {
+                                                cursorBitmap.UnlockBits(bitmapData);
+                                            }
+
+                                            // Enable high-quality rendering for the cursor
+                                            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                                            g.CompositingMode = CompositingMode.SourceOver;
+                                            g.CompositingQuality = CompositingQuality.HighQuality;
+                                            g.SmoothingMode = SmoothingMode.None;
+                                            g.PixelOffsetMode = PixelOffsetMode.Half;
+
+                                            g.DrawImage(cursorBitmap,
+                                                currentCursor.Position.X,
+                                                currentCursor.Position.Y);
+                                        }
+                                    }
+                                    else if (currentCursor.ShapeInfo.Type == (int)CursorShapeType.MonoChrome && 
+                                        currentCursor.ShapeInfo.Width < 10) // Typical text cursor is very narrow
+                                    {
+                                        // Create a simpler, better-looking text cursor
+                                        using (var cursorBitmap = new Bitmap(
+                                            currentCursor.ShapeInfo.Width,
+                                            currentCursor.ShapeInfo.Height,
+                                            PixelFormat.Format32bppArgb))
+                                        {
+                                            using (Graphics cursorG = Graphics.FromImage(cursorBitmap))
+                                            {
+                                                // Draw a simple vertical line for text cursor
+                                                cursorG.Clear(Color.Transparent);
+                                                using (Pen cursorPen = new Pen(Color.White, 1))
+                                                {
+                                                    int middle = cursorBitmap.Width / 2;
+                                                    cursorG.DrawLine(cursorPen, 
+                                                        middle, 0,
+                                                        middle, cursorBitmap.Height);
+                                                }
+                                            }
+                                            
+                                            // Draw it at the right position
+                                            g.DrawImage(cursorBitmap,
+                                                currentCursor.Position.X,
+                                                currentCursor.Position.Y);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        try
+                                        {
+                                            // Handle monochrome cursor (like text cursor)
+                                            int width = currentCursor.ShapeInfo.Width;
+                                            int height = currentCursor.ShapeInfo.Height;
+                                            int pitch = currentCursor.ShapeInfo.Pitch;
+
+                                            // Add validation
+                                            if (width <= 0 || height <= 0 || pitch <= 0 || currentCursor.ShapeBuffer == null)
+                                            {
+                                                Console.WriteLine("Invalid cursor dimensions or null buffer");
+                                                return;
+                                            }
+
+                                            using (var cursorBitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                                            {
+                                                // Process XOR and AND masks
+                                                int maskSize = (pitch * height);
+                                                
+                                                // Validate buffer size before proceeding
+                                                if (currentCursor.ShapeBuffer.Length < maskSize * 2)
+                                                {
+                                                    Console.WriteLine($"Cursor buffer too small. Expected {maskSize * 2}, got {currentCursor.ShapeBuffer.Length}");
+                                                    return;
+                                                }
+
+                                                byte[] andMask = new byte[maskSize];
+                                                byte[] xorMask = new byte[maskSize];
+
+                                                try
+                                                {
+                                                    Array.Copy(currentCursor.ShapeBuffer, 0, andMask, 0, maskSize);
+                                                    Array.Copy(currentCursor.ShapeBuffer, maskSize, xorMask, 0, maskSize);
+
+                                                    // Convert monochrome masks to actual pixels
+                                                    for (int y = 0; y < height; y++)
+                                                    {
+                                                        for (int x = 0; x < width; x++)
+                                                        {
+                                                            // Calculate indices with bounds checking
+                                                            int byteIndex = (y * pitch) + (x / 8);
+                                                            if (byteIndex >= maskSize)
+                                                            {
+                                                                Console.WriteLine($"Invalid byte index: {byteIndex}, maskSize: {maskSize}");
+                                                                continue;
+                                                            }
+
+                                                            int bitIndex = 7 - (x % 8);
+                                                            
+                                                            bool andBit = (andMask[byteIndex] & (1 << bitIndex)) != 0;
+                                                            bool xorBit = (xorMask[byteIndex] & (1 << bitIndex)) != 0;
+
+                                                            Color pixelColor;
+                                                            
+                                                            // FIXED: Correct logic for monochrome cursor rendering
+                                                            // Windows monochrome cursors use the AND mask to create a screen hole
+                                                            // and the XOR mask to draw the cursor itself (inverted color)
+                                                            if (andBit)
+                                                            {
+                                                                // AND bit is 1 - screen mask (to clear background)
+                                                                if (xorBit)
+                                                                    // Where AND=1 and XOR=1: Draw inverse screen (for text cursor)
+                                                                    pixelColor = Color.FromArgb(128, 255, 255, 255); // Semi-transparent white (inverting effect)
+                                                                else
+                                                                    // Where AND=1 and XOR=0: Draw transparent black (screen hole)
+                                                                    pixelColor = Color.Transparent;
+                                                            }
+                                                            else
+                                                            {
+                                                                // AND bit is 0 - opaque cursor pixel
+                                                                if (xorBit)
+                                                                    // Where AND=0 and XOR=1: Draw white
+                                                                    pixelColor = Color.White;
+                                                                else
+                                                                    // Where AND=0 and XOR=0: Draw transparent (not black)
+                                                                    // This is the key fix for black background issues
+                                                                    pixelColor = Color.Transparent;
+                                                            }
+
+                                                            cursorBitmap.SetPixel(x, y, pixelColor);
+                                                        }
+                                                    }
+
+                                                    // Enable high-quality rendering for the cursor
+                                                    g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                                                    g.CompositingMode = CompositingMode.SourceOver;
+                                                    g.CompositingQuality = CompositingQuality.HighQuality;
+                                                    g.SmoothingMode = SmoothingMode.None;
+                                                    g.PixelOffsetMode = PixelOffsetMode.Half;
+
+                                                    g.DrawImage(cursorBitmap,
+                                                        currentCursor.Position.X,
+                                                        currentCursor.Position.Y);
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Error processing cursor masks: {ex.Message}");
+                                                    // Continue without drawing cursor
+                                                }
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"Error drawing monochrome cursor: {ex.Message}");
+                                            // Don't rethrow - allow capture to continue without cursor
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     finally
                     {
-                        ReleaseDC(IntPtr.Zero, desktopDC);
+                        // Release the frame after we're done with it
+                        outputDuplication.ReleaseFrame();
+                        desktopResource?.Dispose();
                     }
                 }
                 else
                 {
-                    // Original capture method as fallback
-                    IntPtr desktopDC = GetDC(IntPtr.Zero);
-                    IntPtr memoryDC = CreateCompatibleDC(desktopDC);
-                    IntPtr captureBitmap = CreateCompatibleBitmap(desktopDC, actualWidth, actualHeight);
-                    IntPtr oldObject = SelectObject(memoryDC, captureBitmap);
-                    
-                    bool success = BitBlt(
-                        memoryDC, 0, 0, actualWidth, actualHeight,
-                        desktopDC, actualLeft, actualTop, SRCCOPY);
-                    
-                    if (success)
-                    {
-                        if (capturedScreen != null)
-                        {
-                            capturedScreen.Dispose();
-                        }
-                        
-                        capturedScreen = Bitmap.FromHbitmap(captureBitmap);
-                        DrawCursorOnBitmap(capturedScreen, captureArea);
-                    }
-                    
-                    SelectObject(memoryDC, oldObject);
-                    DeleteObject(captureBitmap);
-                    DeleteDC(memoryDC);
-                    ReleaseDC(IntPtr.Zero, desktopDC);
+                    Console.WriteLine("No desktop resource acquired or frame acquisition failed");
                 }
+            }
+            catch (SharpDXException ex) when (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.WaitTimeout.Result.Code)
+            {
+                // Timeout is normal if no new frame is available
+                Console.WriteLine("Timeout waiting for next frame");
+            }
+            catch (SharpDXException ex) when (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.AccessLost.Result.Code)
+            {
+                // Access lost - desktop switch or user pressed Windows+L
+                Console.WriteLine("Access to desktop lost. Attempting to reinitialize...");
+                
+                // Clean up and reinitialize
+                CleanupDuplicationResources();
+                InitializeDesktopDuplication();
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error capturing screen: {ex.Message}");
-            }
-        }
-
-        private void DrawCursorOnBitmap(Bitmap bitmap, Rectangle screenBounds)
-        {
-            // Get cursor information
-            CURSORINFO cursorInfo = new CURSORINFO();
-            cursorInfo.cbSize = Marshal.SizeOf(cursorInfo);
-            
-            if (GetCursorInfo(out cursorInfo) && (cursorInfo.flags & CURSOR_SHOWING) != 0)
-            {
-                // Get cursor position and handle
-                IntPtr cursorHandle = cursorInfo.hCursor;
-                POINT cursorPosition = cursorInfo.ptScreenPos;
+                Console.WriteLine(ex.StackTrace);
                 
-                // Check if cursor is in capture area
-                if (cursorPosition.x >= screenBounds.Left && cursorPosition.x <= screenBounds.Right &&
-                    cursorPosition.y >= screenBounds.Top && cursorPosition.y <= screenBounds.Bottom)
-                {
-                    // Get hotspot information to properly position the cursor
-                    ICONINFO iconInfo;
-                    if (GetIconInfo(cursorHandle, out iconInfo))
-                    {
-                        try
-                        {
-                            // Calculate cursor position relative to screen bounds, accounting for scaling
-                            int cursorX = (int)((cursorPosition.x - screenBounds.Left) * sourceScaleFactor) - iconInfo.xHotspot;
-                            int cursorY = (int)((cursorPosition.y - screenBounds.Top) * sourceScaleFactor) - iconInfo.yHotspot;
-                            
-                            // Draw cursor on the bitmap
-                            using (Graphics g = Graphics.FromImage(bitmap))
-                            {
-                                IntPtr hdc = g.GetHdc();
-                                DrawIcon(hdc, cursorX, cursorY, cursorHandle);
-                                g.ReleaseHdc(hdc);
-                            }
-                            
-                            // Clean up icon resources
-                            if (iconInfo.hbmColor != IntPtr.Zero)
-                                DeleteObject(iconInfo.hbmColor);
-                            if (iconInfo.hbmMask != IntPtr.Zero)
-                                DeleteObject(iconInfo.hbmMask);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error drawing cursor: {ex.Message}");
-                        }
-                    }
-                }
+                // Draw test pattern as fallback when capture fails
+                DrawTestPattern();
             }
         }
 
@@ -487,10 +860,21 @@ namespace ARContentStabilizer
             {
                 if (capturedScreen != null)
                 {
+                    // Use local variables to prevent race conditions
+                    Bitmap localCaptured;
+                    
+                    // Create a safe copy of the captured screen to avoid bitmap locking issues
+                    lock (capturedScreen)
+                    {
+                        // Create a copy if needed
+                        localCaptured = new Bitmap(capturedScreen);
+                    }
+                    
+                    // Now process the copy without holding the lock
                     var resizeStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     
-                    // Only create a new bitmap if necessary
-                    lock (this) // Prevent race condition with CaptureScreen
+                    // Create a new scaled capture if needed
+                    lock (this)
                     {
                         if (scaledCapture == null || 
                             scaledCapture.Width != config.ContentSize.Width || 
@@ -501,10 +885,9 @@ namespace ARContentStabilizer
                         }
                         
                         // Calculate scaled dimensions to maintain aspect ratio
-                        Rectangle sourceRect = new Rectangle(0, 0, capturedScreen.Width, capturedScreen.Height);
+                        Rectangle sourceRect = new Rectangle(0, 0, localCaptured.Width, localCaptured.Height);
                         Rectangle destRect = CalculateScaledRectangle(sourceRect, config.ContentSize);
                         
-                        // Use optimized scaling based on performance settings
                         using (Graphics g = Graphics.FromImage(scaledCapture))
                         {
                             // Set quality based on performance settings
@@ -524,27 +907,27 @@ namespace ARContentStabilizer
                                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                             }
                             
-                            // Clear background only if needed (source doesn't fill the entire area)
+                            // Clear background if needed
                             if (destRect.Width < config.ContentSize.Width || destRect.Height < config.ContentSize.Height)
                             {
                                 g.Clear(Color.Black);
                             }
                             
                             // Draw image
-                            g.DrawImage(capturedScreen, destRect, sourceRect, GraphicsUnit.Pixel);
+                            g.DrawImage(localCaptured, destRect, sourceRect, GraphicsUnit.Pixel);
                         }
                     }
                     
-                    //Console.WriteLine($"Image scaling time: {resizeStopwatch.ElapsedMilliseconds} ms");
+                    // Dispose of the local copy
+                    localCaptured.Dispose();
                     
-                    // Update UI on the UI thread if needed
+                    // Update UI on the UI thread
                     if (contentDisplay.InvokeRequired)
                     {
                         contentDisplay.BeginInvoke(new Action(() => {
-                            // Set image without creating a new reference (avoids unnecessary redraws)
                             if (contentDisplay.Image == scaledCapture)
                             {
-                                contentDisplay.Invalidate(); // Lighter than Refresh()
+                                contentDisplay.Invalidate();
                             }
                             else
                             {
@@ -554,10 +937,9 @@ namespace ARContentStabilizer
                     }
                     else
                     {
-                        // Set image without creating a new reference (avoids unnecessary redraws)
                         if (contentDisplay.Image == scaledCapture)
                         {
-                            contentDisplay.Invalidate(); // Lighter than Refresh()
+                            contentDisplay.Invalidate();
                         }
                         else
                         {
@@ -569,6 +951,39 @@ namespace ARContentStabilizer
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating content image: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+            }
+        }
+
+        private void FallbackCaptureScreen()
+        {
+            try
+            {
+                // Get screen bounds
+                Screen screen = Screen.AllScreens[Math.Min(config.SourceDisplayIndex, Screen.AllScreens.Length - 1)];
+                
+                lock (capturedScreen)
+                {
+                    // Create a new bitmap if needed
+                    if (capturedScreen == null || 
+                        capturedScreen.Width != screen.Bounds.Width || 
+                        capturedScreen.Height != screen.Bounds.Height)
+                    {
+                        capturedScreen?.Dispose();
+                        capturedScreen = new Bitmap(screen.Bounds.Width, screen.Bounds.Height, PixelFormat.Format32bppArgb);
+                    }
+                    
+                    using (Graphics g = Graphics.FromImage(capturedScreen))
+                    {
+                        // Capture the screen
+                        g.CopyFromScreen(screen.Bounds.X, screen.Bounds.Y, 0, 0, screen.Bounds.Size);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Fallback capture failed: {ex.Message}");
+                DrawTestPattern(); // Use test pattern as a last resort
             }
         }
 
@@ -625,12 +1040,148 @@ namespace ARContentStabilizer
         public void SetCaptureRegion(Rectangle region)
         {
             captureRegion = region;
+            
+            // If using Desktop Duplication API, we may need to reinitialize
+            if (outputDuplication != null)
+            {
+                // For now, we'll ignore the region with Desktop Duplication as it's generally per-monitor
+                Console.WriteLine("Note: Capture region is not fully supported with Desktop Duplication API.");
+            }
         }
 
         // Reset to capture the full screen
         public void ResetCaptureRegion()
         {
             captureRegion = Rectangle.Empty;
+        }
+
+        private void DrawTestPattern()
+        {
+            // Draw a test pattern to verify the display pipeline
+            lock (capturedScreen)
+            {
+                using (Graphics g = Graphics.FromImage(capturedScreen))
+                {
+                    // Clear to a color
+                    g.Clear(Color.DarkBlue);
+                    
+                    // Draw some recognizable elements
+                    using (Brush redBrush = new SolidBrush(Color.Red))
+                    using (Brush greenBrush = new SolidBrush(Color.Green))
+                    using (Pen whitePen = new Pen(Color.White, 3))
+                    {
+                        // Draw diagonal lines
+                        g.DrawLine(whitePen, 0, 0, capturedScreen.Width, capturedScreen.Height);
+                        g.DrawLine(whitePen, capturedScreen.Width, 0, 0, capturedScreen.Height);
+                        
+                        // Draw some shapes
+                        g.FillRectangle(redBrush, capturedScreen.Width / 4, capturedScreen.Height / 4, 
+                                       capturedScreen.Width / 2, capturedScreen.Height / 2);
+                        g.FillEllipse(greenBrush, capturedScreen.Width / 3, capturedScreen.Height / 3, 
+                                     capturedScreen.Width / 3, capturedScreen.Height / 3);
+                    }
+                    
+                    // Draw text showing dimensions
+                    using (Font font = new Font("Arial", 24))
+                    using (Brush whiteBrush = new SolidBrush(Color.White))
+                    {
+                        g.DrawString($"Test Pattern {capturedScreen.Width}x{capturedScreen.Height}", 
+                                    font, whiteBrush, 20, 20);
+                        g.DrawString($"Source Display: {config.SourceDisplayIndex}", 
+                                    font, whiteBrush, 20, 60);
+                    }
+                }
+            }
+        }
+
+        // Add this method to update cursor information when capturing frames
+        private void UpdateCursor(OutputDuplicateFrameInformation frameInfo)
+        {
+            try
+            {
+                if (frameInfo.LastMouseUpdateTime == 0)
+                    return;
+
+                // Update cursor position and visibility directly from frameInfo
+                currentCursor.Position = new Point(
+                    frameInfo.PointerPosition.Position.X,
+                    frameInfo.PointerPosition.Position.Y
+                );
+                currentCursor.IsVisible = frameInfo.PointerPosition.Visible;
+
+                // If the cursor shape has changed and has valid size
+                if (frameInfo.PointerShapeBufferSize > 0)
+                {
+                    try
+                    {
+                        // Create unmanaged memory pointer for the shape buffer
+                        IntPtr bufferPtr = Marshal.AllocHGlobal(frameInfo.PointerShapeBufferSize);
+                        try
+                        {
+                            int bufferSize;
+                            OutputDuplicatePointerShapeInformation shapeInfo;
+                            
+                            // Get the cursor shape
+                            outputDuplication.GetFramePointerShape(
+                                frameInfo.PointerShapeBufferSize,
+                                bufferPtr,
+                                out bufferSize,
+                                out shapeInfo
+                            );
+
+                            // Validate the shape info and buffer size
+                            if (bufferSize > 0 && 
+                                shapeInfo.Width > 0 && 
+                                shapeInfo.Height > 0 && 
+                                shapeInfo.Pitch > 0)
+                            {
+                                // Calculate the expected buffer size based on shape info
+                                int expectedSize = shapeInfo.Pitch * shapeInfo.Height;
+                                if (shapeInfo.Type == (int)CursorShapeType.MonoChrome)
+                                {
+                                    expectedSize *= 2; // Monochrome cursors have AND and XOR masks
+                                }
+
+                                // Only update if the size makes sense
+                                if (bufferSize <= frameInfo.PointerShapeBufferSize && 
+                                    bufferSize >= expectedSize)
+                                {
+                                    // Allocate new buffer
+                                    currentCursor.ShapeBuffer = new byte[bufferSize];
+                                    currentCursor.ShapeInfo = shapeInfo;
+
+                                    // Copy from unmanaged memory to managed buffer
+                                    Marshal.Copy(bufferPtr, currentCursor.ShapeBuffer, 0, bufferSize);
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"Invalid cursor buffer size: {bufferSize}, expected: {expectedSize}");
+                                    currentCursor.ShapeBuffer = null;
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("Invalid cursor shape info");
+                                currentCursor.ShapeBuffer = null;
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(bufferPtr);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error getting cursor shape: {ex.Message}");
+                        currentCursor.ShapeBuffer = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating cursor: {ex.Message}");
+                currentCursor.ShapeBuffer = null;
+            }
         }
 
         #endregion

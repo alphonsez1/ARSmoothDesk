@@ -7,6 +7,8 @@ using System.IO;
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
 using Timer = System.Windows.Forms.Timer;
+using SharpDX.Direct3D11;
+using SharpDX.DXGI;
 
 namespace ARContentStabilizer
 {
@@ -71,7 +73,7 @@ namespace ARContentStabilizer
             this.WindowState = FormWindowState.Maximized;
             
             // Set background color to black
-            this.BackColor = Color.Black;
+            this.BackColor = Color.White;
             
             float radius = SphereTracking.CalculateDistanceToDisplay(
                 config.DisplaySize.Width, config.DisplaySize.Height, config.FieldOfView);
@@ -318,9 +320,31 @@ namespace ARContentStabilizer
             // Set DLL directory to ensure dependencies can be found
             SetDllDirectory(Path.GetDirectoryName(Application.ExecutablePath));
             
+            // Force load SharpDX DLLs to prevent loading issues
+            LoadRequiredAssemblies();
+            
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
+        }
+
+        private static void LoadRequiredAssemblies()
+        {
+            try
+            {
+                // Ensure SharpDX assemblies are loaded
+                var sharpDX = typeof(SharpDX.Direct3D11.Device).Assembly;
+                var sharpDXDXGI = typeof(SharpDX.DXGI.Factory1).Assembly;
+                
+                Console.WriteLine($"SharpDX loaded: {sharpDX.GetName().Version}");
+                Console.WriteLine($"SharpDX.DXGI loaded: {sharpDXDXGI.GetName().Version}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading SharpDX assemblies: {ex.Message}");
+                MessageBox.Show($"Failed to load SharpDX components: {ex.Message}\n\nPlease ensure all required DLLs are in the application directory.", 
+                    "Error Loading Dependencies", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         // Add this to help find DLL dependencies

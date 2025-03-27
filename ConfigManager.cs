@@ -30,7 +30,10 @@ namespace ARContentStabilizer
         public bool UseThreadedCapture { get; set; } = true;
         public int SkipFrames { get; set; } = 0;
         public bool UseDoubleBuffering { get; set; } = true;
-        public int CaptureThreadSleepTime { get; set; } = 5;
+        public int CaptureThreadSleepTime { get; set; } = 1;
+
+        // Add to ConfigManager class
+        public bool EnableTestPattern { get; set; } = false;
 
         #endregion
 

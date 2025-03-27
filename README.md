@@ -35,13 +35,25 @@ Currently, you can only run the application from source code:
 2. Install [Visual Studio Code](https://code.visualstudio.com/)
 3. Clone or download this repository
 4. Open the project folder in VS Code
-5. Open `main.cs` in the editor
-6. Click the Run button (or press F5) to build and run the application
+5. In terminal, run `dotnet restore`.
+6. Open `main.cs` in the editor
+7. Click the Run button (or press F5) to build and run the application
 
 ## Requirements
 
 - Windows 10/11
 - Xreal AR glasses (I have only tested Air and Air Ultra)
+- .NET 9.0 or higher
+- DirectX 11 compatible graphics card
+
+## NuGet Dependencies
+
+This project relies on the following NuGet packages:
+- SharpDX (4.2.0)
+- SharpDX.Direct3D11 (4.2.0)
+- SharpDX.DXGI (4.2.0)
+
+These packages are defined in the `.csproj` file and will be automatically downloaded when running `dotnet restore`.
 
 ## Development Status
 
