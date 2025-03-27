@@ -122,36 +122,17 @@ namespace ARContentStabilizer
 
         #region Configuration and Settings
 
-        // Configuration file path
-        private readonly string configFilePath = "ARConfig.txt";
+        // Configuration manager
+        private readonly ConfigManager config;
         
-        // Default settings that can be overridden by config
-        private Size displaySize = new Size(1920, 1080);
-        private Size contentSize = new Size(1366, 768);
-        private int targetDisplayIndex = -1; // Default to last display
-        private int sourceDisplayIndex = 0;  // Default to primary display
-
-        private float fov = 52.0f; // Field of view in degrees
-
-        // Movement settings
-        private float followSpeedUp = 1.5f;
-        private float followSpeedDown = 2.5f;
-        private int captureFrameRate = 60;
-
         // Scaling factors
         private float sourceScaleFactor = 1.0f;
 
         // Performance settings
-        private bool useDirectCapture = true;    // Use direct memory copy when possible
-        private bool useLowQualityScaling = true; // Use lower quality scaling for better performance
         private Rectangle captureRegion = Rectangle.Empty; // Optional region to capture instead of full screen
-        private bool useDoubleBuffering = true;  // Use double buffering to avoid flickering
-        private bool useThreadedCapture = true;  // Use background thread for capture
-        private int captureThreadSleepTime = 5;  // Sleep time in ms between capture operations
         private bool captureInProgress = false;  // Flag to prevent overlapping captures
         private System.Threading.Thread captureThread; // Background thread for capture
         private volatile bool shutdownThreads = false; // Signal to shutdown background threads
-        private int skipFrames = 0;              // Number of frames to skip (for lower-end systems)
 
         #endregion
 
@@ -190,6 +171,9 @@ namespace ARContentStabilizer
 
         public MainForm()
         {
+            // Initialize configuration manager
+            config = new ConfigManager();
+            
             // Make application DPI aware
             SetDpiAwareness();
 
@@ -200,11 +184,8 @@ namespace ARContentStabilizer
             // Set background color to black
             this.BackColor = Color.Black;
             
-            // Load configuration settings
-            LoadConfiguration();
-
             this.radius = SphereTracking.CalculateDistanceToDisplay(
-                displaySize.Width, displaySize.Height, fov);
+                config.DisplaySize.Width, config.DisplaySize.Height, config.FieldOfView);
             
             // Set the form to run on the target display
             SetTargetDisplay();
@@ -242,150 +223,17 @@ namespace ARContentStabilizer
             }
         }
 
-        private void LoadConfiguration()
-        {
-            try
-            {
-                if (File.Exists(configFilePath))
-                {
-                    string[] lines = File.ReadAllLines(configFilePath);
-                    foreach (string line in lines)
-                    {
-                        string trimmedLine = line.Trim();
-                        if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith("#"))
-                            continue; // Skip comments and empty lines
-
-                        string[] parts = trimmedLine.Split('=');
-                        if (parts.Length != 2)
-                            continue;
-
-                        string key = parts[0].Trim();
-                        string value = parts[1].Trim();
-
-                        switch (key.ToLower())
-                        {
-                            case "displaywidth":
-                                if (int.TryParse(value, out int displayWidth))
-                                    displaySize.Width = displayWidth;
-                                break;
-                            case "displayheight":
-                                if (int.TryParse(value, out int displayHeight))
-                                    displaySize.Height = displayHeight;
-                                break;
-                            case "contentwidth":
-                                if (int.TryParse(value, out int contentWidth))
-                                    contentSize.Width = contentWidth;
-                                break;
-                            case "contentheight":
-                                if (int.TryParse(value, out int contentHeight))
-                                    contentSize.Height = contentHeight;
-                                break;
-                            case "targetdisplay":
-                                if (int.TryParse(value, out int targetDisplay))
-                                    targetDisplayIndex = targetDisplay;
-                                break;
-                            case "sourcedisplay":
-                                if (int.TryParse(value, out int sourceDisplay))
-                                    sourceDisplayIndex = sourceDisplay;
-                                break;
-                            case "followspeedup":
-                                if (float.TryParse(value, out float speedUp))
-                                    followSpeedUp = speedUp;
-                                break;
-                            case "followspeeddown":
-                                if (float.TryParse(value, out float speedDown))
-                                    followSpeedDown = speedDown;
-                                break;
-                            case "framerate":
-                                if (int.TryParse(value, out int frameRate))
-                                    captureFrameRate = frameRate;
-                                break;
-                            case "usedirectcapture":
-                                if (bool.TryParse(value, out bool directCapture))
-                                    useDirectCapture = directCapture;
-                                break;
-                            case "uselowqualityscaling":
-                                if (bool.TryParse(value, out bool lowQualityScaling))
-                                    useLowQualityScaling = lowQualityScaling;
-                                break;
-                            case "usethreadedcapture":
-                                if (bool.TryParse(value, out bool threadedCapture))
-                                    useThreadedCapture = threadedCapture;
-                                break;
-                            case "skipframes":
-                                if (int.TryParse(value, out int frames))
-                                    skipFrames = frames;
-                                break;
-                            case "fieldofview":
-                                if (float.TryParse(value, out float fieldOfView))
-                                    fov = fieldOfView;
-                                break;
-                        }
-                    }
-                }
-                else
-                {
-                    // Create default config file if it doesn't exist
-                    CreateDefaultConfigFile();
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error loading configuration: {ex.Message}\nUsing default settings.",
-                    "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        }
-
-        private void CreateDefaultConfigFile()
-        {
-            try
-            {
-                using (StreamWriter writer = new StreamWriter(configFilePath))
-                {
-                    writer.WriteLine("# AR Content Stabilizer Configuration");
-                    writer.WriteLine("# Display sizes");
-                    writer.WriteLine($"DisplayWidth={displaySize.Width}");
-                    writer.WriteLine($"DisplayHeight={displaySize.Height}");
-                    writer.WriteLine($"ContentWidth={contentSize.Width}");
-                    writer.WriteLine($"ContentHeight={contentSize.Height}");
-                    writer.WriteLine();
-                    writer.WriteLine("# Display settings");
-                    writer.WriteLine("# For target display: -1=last display, -2=second-to-last, 0=primary, 1,2,3...=specific displays");
-                    writer.WriteLine($"TargetDisplay={targetDisplayIndex}");
-                    writer.WriteLine($"SourceDisplay={sourceDisplayIndex}");
-                    writer.WriteLine();
-                    writer.WriteLine("# Movement settings");
-                    writer.WriteLine($"FollowSpeedUp={followSpeedUp}");
-                    writer.WriteLine($"FollowSpeedDown={followSpeedDown}");
-                    writer.WriteLine();
-                    writer.WriteLine("# Capture settings");
-                    writer.WriteLine($"FrameRate={captureFrameRate}");
-                    writer.WriteLine();
-                    writer.WriteLine("# Performance settings");
-                    writer.WriteLine($"UseDirectCapture={useDirectCapture}");
-                    writer.WriteLine($"UseLowQualityScaling={useLowQualityScaling}");
-                    writer.WriteLine($"UseThreadedCapture={useThreadedCapture}");
-                    writer.WriteLine($"SkipFrames={skipFrames}");
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error creating default configuration: {ex.Message}",
-                    "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
         private void UpdateBoundaries()
         {
             // Calculate proper boundaries based on the form size, not the display size
             // This ensures the content can move within the current window
             minBoundary = new PointF(
-                -(this.ClientSize.Width - contentSize.Width) / 2f,
-                -(this.ClientSize.Height - contentSize.Height) / 2f
+                -(this.ClientSize.Width - config.ContentSize.Width) / 2f,
+                -(this.ClientSize.Height - config.ContentSize.Height) / 2f
             );
             maxBoundary = new PointF(
-                (this.ClientSize.Width - contentSize.Width) / 2f,
-                (this.ClientSize.Height - contentSize.Height) / 2f
+                (this.ClientSize.Width - config.ContentSize.Width) / 2f,
+                (this.ClientSize.Height - config.ContentSize.Height) / 2f
             );
             
             Console.WriteLine($"Boundary updated: Min({minBoundary.X}, {minBoundary.Y}), Max({maxBoundary.X}, {maxBoundary.Y})");
@@ -395,17 +243,17 @@ namespace ARContentStabilizer
         {
             // Convert relative indices to absolute
             int displayCount = Screen.AllScreens.Length;
-            int actualDisplayIndex = targetDisplayIndex;
+            int actualDisplayIndex = config.TargetDisplayIndex;
             
-            if (targetDisplayIndex < 0)
+            if (config.TargetDisplayIndex < 0)
             {
-                actualDisplayIndex = displayCount + targetDisplayIndex;
+                actualDisplayIndex = displayCount + config.TargetDisplayIndex;
                 
                 // Make sure we don't go below 0
                 if (actualDisplayIndex < 0)
                     actualDisplayIndex = 0;
             }
-            else if (targetDisplayIndex >= displayCount)
+            else if (config.TargetDisplayIndex >= displayCount)
             {
                 actualDisplayIndex = displayCount - 1;
             }
@@ -422,13 +270,13 @@ namespace ARContentStabilizer
             // Create main picturebox to display captured content
             contentDisplay = new PictureBox
             {
-                Size = contentSize,
+                Size = config.ContentSize,
                 SizeMode = PictureBoxSizeMode.StretchImage,
                 BorderStyle = BorderStyle.None
             };
             
             // Enable double buffering on the PictureBox for smoother updates
-            if (useDoubleBuffering)
+            if (config.UseDoubleBuffering)
             {
                 // Enable double buffering using reflection
                 typeof(PictureBox).InvokeMember("DoubleBuffered", 
@@ -439,7 +287,7 @@ namespace ARContentStabilizer
             // Create initial bitmaps
             capturedScreen = new Bitmap(Screen.AllScreens[GetSourceDisplayIndex()].Bounds.Width, 
                                        Screen.AllScreens[GetSourceDisplayIndex()].Bounds.Height);
-            scaledCapture = new Bitmap(contentSize.Width, contentSize.Height);
+            scaledCapture = new Bitmap(config.ContentSize.Width, config.ContentSize.Height);
             
             // Add to form
             this.Controls.Add(contentDisplay);
@@ -462,7 +310,7 @@ namespace ARContentStabilizer
             updateTimer.Tick += UpdateTimer_Tick;
             
             // Set threaded capture or timer-based capture
-            if (useThreadedCapture)
+            if (config.UseThreadedCapture)
             {
                 // Use a dedicated thread for capturing at maximum possible rate
                 captureThread = new System.Threading.Thread(CaptureThreadMethod);
@@ -475,7 +323,7 @@ namespace ARContentStabilizer
                 // Set up timer for screen capture
                 captureTimer = new Timer
                 {
-                    Interval = 1000 / captureFrameRate // Based on configured frame rate
+                    Interval = 1000 / config.CaptureFrameRate // Based on configured frame rate
                 };
                 captureTimer.Tick += CaptureTimer_Tick;
             }
@@ -492,9 +340,9 @@ namespace ARContentStabilizer
                 {
                     // Skip frames if configured
                     frameCounter++;
-                    if (skipFrames > 0 && frameCounter % (skipFrames + 1) != 0)
+                    if (config.SkipFrames > 0 && frameCounter % (config.SkipFrames + 1) != 0)
                     {
-                        System.Threading.Thread.Sleep(captureThreadSleepTime);
+                        System.Threading.Thread.Sleep(config.CaptureThreadSleepTime);
                         continue;
                     }
                     
@@ -513,8 +361,8 @@ namespace ARContentStabilizer
                             // Add a small sleep to prevent using 100% CPU
                             // Calculate sleep time based on target frame rate
                             long elapsedMs = stopWatch.ElapsedMilliseconds;
-                            int targetFrameTime = 1000 / captureFrameRate;
-                            int sleepTime = Math.Max(captureThreadSleepTime, targetFrameTime - (int)elapsedMs);
+                            int targetFrameTime = 1000 / config.CaptureFrameRate;
+                            int sleepTime = Math.Max(config.CaptureThreadSleepTime, targetFrameTime - (int)elapsedMs);
                             
                             System.Threading.Thread.Sleep(sleepTime);
                         }
@@ -526,7 +374,7 @@ namespace ARContentStabilizer
                     else
                     {
                         // Previous capture still processing, sleep for a short time
-                        System.Threading.Thread.Sleep(captureThreadSleepTime);
+                        System.Threading.Thread.Sleep(config.CaptureThreadSleepTime);
                     }
                 }
             }
@@ -547,11 +395,10 @@ namespace ARContentStabilizer
                 // Get initial rotation data
                 UpdateRotationData();
                 screenCenterRay = viewFrontRay;
-                screenRightRay = viewRightRay;
                 Console.WriteLine($"Initial view center ray: {viewFrontRay.X}, {viewFrontRay.Y}, {viewFrontRay.Z}");
                 // Start update loops
                 updateTimer.Start();
-                if (!useThreadedCapture && captureTimer != null)
+                if (!config.UseThreadedCapture && captureTimer != null)
                     captureTimer.Start();
             }
             else
@@ -569,17 +416,17 @@ namespace ARContentStabilizer
         {
             // Convert relative indices to absolute
             int displayCount = Screen.AllScreens.Length;
-            int actualDisplayIndex = sourceDisplayIndex;
+            int actualDisplayIndex = config.SourceDisplayIndex;
             
-            if (sourceDisplayIndex < 0)
+            if (config.SourceDisplayIndex < 0)
             {
-                actualDisplayIndex = displayCount + sourceDisplayIndex;
+                actualDisplayIndex = displayCount + config.SourceDisplayIndex;
                 
                 // Make sure we don't go below 0
                 if (actualDisplayIndex < 0)
                     actualDisplayIndex = 0;
             }
-            else if (sourceDisplayIndex >= displayCount)
+            else if (config.SourceDisplayIndex >= displayCount)
             {
                 actualDisplayIndex = displayCount - 1;
             }
@@ -708,7 +555,7 @@ namespace ARContentStabilizer
             
             // Stop timers
             updateTimer.Stop();
-            if (!useThreadedCapture && captureTimer != null)
+            if (!config.UseThreadedCapture && captureTimer != null)
                 captureTimer.Stop();
             
             // Wait for thread to exit
@@ -795,7 +642,7 @@ namespace ARContentStabilizer
                 int actualLeft = (int)(captureArea.Left * sourceScaleFactor);
                 int actualTop = (int)(captureArea.Top * sourceScaleFactor);
                 
-                if (useDirectCapture)
+                if (config.UseDirectCapture)
                 {
                     // Direct capture using BitBlt for better performance
                     IntPtr desktopDC = GetDC(IntPtr.Zero);
@@ -937,22 +784,22 @@ namespace ARContentStabilizer
                     lock (this) // Prevent race condition with CaptureScreen
                     {
                         if (scaledCapture == null || 
-                            scaledCapture.Width != contentSize.Width || 
-                            scaledCapture.Height != contentSize.Height)
+                            scaledCapture.Width != config.ContentSize.Width || 
+                            scaledCapture.Height != config.ContentSize.Height)
                         {
                             scaledCapture?.Dispose();
-                            scaledCapture = new Bitmap(contentSize.Width, contentSize.Height, PixelFormat.Format32bppRgb);
+                            scaledCapture = new Bitmap(config.ContentSize.Width, config.ContentSize.Height, PixelFormat.Format32bppRgb);
                         }
                         
                         // Calculate scaled dimensions to maintain aspect ratio
                         Rectangle sourceRect = new Rectangle(0, 0, capturedScreen.Width, capturedScreen.Height);
-                        Rectangle destRect = CalculateScaledRectangle(sourceRect, contentSize);
+                        Rectangle destRect = CalculateScaledRectangle(sourceRect, config.ContentSize);
                         
                         // Use optimized scaling based on performance settings
                         using (Graphics g = Graphics.FromImage(scaledCapture))
                         {
                             // Set quality based on performance settings
-                            if (useLowQualityScaling)
+                            if (config.UseLowQualityScaling)
                             {
                                 g.CompositingMode = CompositingMode.SourceCopy; // Fastest
                                 g.InterpolationMode = InterpolationMode.Default;
@@ -969,7 +816,7 @@ namespace ARContentStabilizer
                             }
                             
                             // Clear background only if needed (source doesn't fill the entire area)
-                            if (destRect.Width < contentSize.Width || destRect.Height < contentSize.Height)
+                            if (destRect.Width < config.ContentSize.Width || destRect.Height < config.ContentSize.Height)
                             {
                                 g.Clear(Color.Black);
                             }
